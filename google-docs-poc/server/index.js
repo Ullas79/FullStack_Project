@@ -115,22 +115,125 @@ app.post('/api/auth/login', async (req, res) => {
 });// ... after your /api/auth/login route ...
 
 // --- CREATE A NEW DOCUMENT ---
-app.post('/api/documents', auth, async (req, res) => {
-  // 'auth' middleware runs first, gets user ID, and puts it in req.user.id
+app.get('/api/documents', auth, async (req, res) => {
   try {
-    const newDoc = new Document({
-      owner: req.user.id, // Set the owner
-      title: 'Untitled Document',
-      data: {}, // Start with blank data
-    });
+    // Find documents where the user is EITHER the owner OR a collaborator
+    const documents = await Document.find({
+      $or: [
+        { owner: req.user.id },
+        { collaborators: req.user.id }
+      ]
+    }).sort({ updatedAt: -1 }); // Show newest first
 
-    const document = await newDoc.save();
-    res.json(document); // Send the new document back
+    res.json(documents);
   } catch (err) {
     console.error(err.message);
     res.status(500).send('Server Error');
   }
 });
+app.post('/api/documents/:id/share', auth, async (req, res) => {
+  try {
+    const documentId = req.params.id;
+    const { email } = req.body; // Email of the user to share with
+    const loggedInUserId = req.user.id;
+
+    // 1. Find the document
+    const document = await Document.findById(documentId);
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    // 2. Check if the logged-in user is the owner (only owner can share)
+    if (document.owner.toString() !== loggedInUserId) {
+      return res.status(403).json({ message: 'Only the document owner can share' });
+    }
+
+    // 3. Find the user to share with
+    const userToShareWith = await User.findOne({ email });
+    if (!userToShareWith) {
+      return res.status(404).json({ message: 'User to share with not found' });
+    }
+    const userToShareWithId = userToShareWith._id.toString();
+
+    // 4. Check if they're sharing with themselves
+    if (userToShareWithId === loggedInUserId) {
+      return res.status(400).json({ message: 'You cannot share a document with yourself' });
+    }
+
+    // 5. Check if document is already shared with this user
+    if (document.collaborators.some(id => id.toString() === userToShareWithId)) {
+      return res.status(400).json({ message: 'Document already shared with this user' });
+    }
+
+    // 6. Add the user to the collaborators list and save
+    document.collaborators.push(userToShareWithId);
+    await document.save();
+
+    res.json({ message: 'Document shared successfully' });
+
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+// --- ADD THIS NEW ROUTE FOR RENAMING ---
+
+app.put('/api/documents/:id/rename', auth, async (req, res) => {
+  try {
+    const documentId = req.params.id;
+    const { title } = req.body; // Get the new title from the request
+    const loggedInUserId = req.user.id;
+
+    if (!title) {
+      return res.status(400).json({ message: 'Title is required' });
+    }
+
+    const document = await Document.findById(documentId);
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    // Only the owner can rename
+    if (document.owner.toString() !== loggedInUserId) {
+      return res.status(403).json({ message: 'Only the document owner can rename' });
+    }
+
+    // Update the title and save
+    document.title = title;
+    await document.save();
+
+    res.json(document); // Send back the updated document
+
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// --- END OF NEW ROUTE ---
+// // --- ADD THIS NEW ROUTE FOR DELETING ---
+
+app.delete('/api/documents/:id', auth, async (req, res) => {
+  try {
+    const documentId = req.params.id;
+    const loggedInUserId = req.user.id;
+
+    const document = await Document.findById(documentId);
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    // Only the owner can delete
+    if (document.owner.toString() !== loggedInUserId) {
+      return res.status(403).json({ message: 'Only the document owner can delete' });
+    }
+
+    // Find and delete the document
+    await Document.findByIdAndDelete(documentId);
+
+    res.json({ message: 'Document deleted successfully' });
+
+  } catch (err){ console.error(err.message); res.status(500).send('Server Error'); } })
 
 // --- GET ALL OF A USER'S DOCUMENTS ---
 app.get('/api/documents', auth, async (req, res) => {
@@ -146,7 +249,54 @@ app.get('/api/documents', auth, async (req, res) => {
   }
 
 });
+// ... after your app.delete('/api/documents/:id', ...) route ...
 
+// --- ADD THIS NEW ROUTE FOR UNSHARING ---
+
+app.post('/api/documents/:id/unshare', auth, async (req, res) => {
+  try {
+    const documentId = req.params.id;
+    const { email } = req.body; // Email of the user to remove
+    const loggedInUserId = req.user.id;
+
+    // 1. Find the document
+    const document = await Document.findById(documentId);
+    if (!document) {
+      return res.status(404).json({ message: 'Document not found' });
+    }
+
+    // 2. Check if the logged-in user is the owner
+    if (document.owner.toString() !== loggedInUserId) {
+      return res.status(403).json({ message: 'Only the document owner can manage sharing' });
+    }
+
+    // 3. Find the user to remove
+    const userToRemove = await User.findOne({ email });
+    if (!userToRemove) {
+      return res.status(404).json({ message: 'User to remove not found' });
+    }
+    const userToRemoveId = userToRemove._id;
+
+    // 4. Check if the user is actually a collaborator
+    const isCollaborator = document.collaborators.some(id => id.equals(userToRemoveId));
+    if (!isCollaborator) {
+      return res.status(400).json({ message: 'User is not a collaborator on this document' });
+    }
+
+    // 5. Remove the user's ID from the collaborators array
+    // The .pull() method is a special Mongoose helper for arrays
+    document.collaborators.pull(userToRemoveId);
+    await document.save();
+
+    res.json({ message: 'Collaborator removed successfully' });
+
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send('Server Error');
+  }
+});
+
+// --- END OF NEW ROUTE ---
 
 io.on('connection', (socket) => {
   console.log('User connected (authenticated):', socket.user.id);
