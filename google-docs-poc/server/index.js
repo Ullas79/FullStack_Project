@@ -50,6 +50,10 @@ io.use((socket, next) => {
     socket.user = decoded.user; // Attach user info to the socket
     next();
   } catch (err) {
+    if (err.name === "TokenExpiredError") {
+      socket.emit("error", "Your session has expired. Please log in again.");
+      return next(new Error("Authentication error: Token expired"));
+    }
     next(new Error("Authentication error: Invalid token"));
   }
 });
@@ -210,6 +214,9 @@ app.put("/api/documents/:id/rename", auth, async (req, res) => {
     document.title = title;
     await document.save();
 
+    // Broadcast the name change to all connected clients in this document's room
+    io.to(documentId).emit("document-renamed", title);
+
     res.json(document); // Send back the updated document
   } catch (err) {
     console.error(err.message);
@@ -239,6 +246,9 @@ app.delete("/api/documents/:id", auth, async (req, res) => {
 
     // Find and delete the document
     await Document.findByIdAndDelete(documentId);
+
+    // --- NEW: Notify clients in the room ---
+    io.to(documentId).emit("document-deleted");
 
     res.json({ message: "Document deleted successfully" });
   } catch (err) {
@@ -306,6 +316,18 @@ app.post("/api/documents/:id/unshare", auth, async (req, res) => {
     document.collaborators.pull(userToRemoveId);
     await document.save();
 
+    // --- NEW: Kick the removed user out of the room in real-time ---
+    // Find the socket for the user who was just removed
+    for (const socket of io.sockets.sockets.values()) {
+      if (socket.user.id === userToRemoveId.toString()) {
+        // Force the user to leave the room
+        socket.leave(documentId);
+        // Notify the user their permission was revoked
+        socket.emit("permission-revoked", documentId);
+        break; // Stop searching once found
+      }
+    }
+
     res.json({ message: "Collaborator removed successfully" });
   } catch (err) {
     console.error(err.message);
@@ -344,7 +366,7 @@ io.on("connection", (socket) => {
       console.log(`User ${userId} joined room ${documentId}`);
 
       // Send the document data to *this* client
-      socket.emit("load-document", document.data);
+      socket.emit("load-document", document);
     } catch (err) {
       console.error(err);
       socket.emit("error", "Server error");
@@ -358,9 +380,15 @@ io.on("connection", (socket) => {
   });
 
   // 3. Listen for saves and update the database
-  socket.on("save-document", async (data, documentId) => {
-    // Here you could add another permission check if you want
-    await Document.findByIdAndUpdate(documentId, { data });
+  socket.on("save-document", async (data, documentId, callback) => {
+    try {
+      // Here you could add another permission check if you want
+      await Document.findByIdAndUpdate(documentId, { data });
+      callback(null, "Document saved successfully"); // Success
+    } catch (err) {
+      console.error("Save error:", err);
+      callback("Error saving document"); // Failure
+    }
   });
 
   socket.on("disconnect", () => {
