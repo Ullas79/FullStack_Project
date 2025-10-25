@@ -38,6 +38,8 @@ function Editor() {
   const { id: documentId } = useParams(); // Get document ID from URL
   const [socket, setSocket] = useState();
   const [value, setValue] = useState("");
+  const [documentTitle, setDocumentTitle] = useState("Loading...");
+  const [saveStatus, setSaveStatus] = useState("Saved");
   const [isLoaded, setIsLoaded] = useState(false);
   const quillRef = useRef();
   const navigate = useNavigate();
@@ -58,8 +60,18 @@ function Editor() {
     });
     setSocket(s);
 
+    // Listen for connection errors (like token expiration)
+    s.on("connect_error", (err) => {
+      if (err.message.includes("Token expired")) {
+        alert("Your session has expired. Please log in again.");
+        localStorage.removeItem("token");
+        navigate("/login");
+      }
+    });
+
     // Disconnect on unmount
     return () => {
+      s.off("connect_error");
       s.disconnect();
     };
   }, [navigate]);
@@ -73,8 +85,9 @@ function Editor() {
     editor.setText("Loading document...");
 
     // Listen for load event (only once)
-    socket.once("load-document", (data) => {
-      editor.setContents(data);
+    socket.once("load-document", (document) => {
+      editor.setContents(document.data);
+      setDocumentTitle(document.title); // <--- SET THE TITLE
       editor.enable();
       setIsLoaded(true);
     });
@@ -100,9 +113,18 @@ function Editor() {
     if (!socket || !documentId || !isLoaded) return;
 
     const interval = setInterval(() => {
+      setSaveStatus("Saving...");
       const editor = quillRef.current.getEditor();
       const contents = editor.getContents();
-      socket.emit("save-document", contents, documentId);
+      socket.emit("save-document", contents, documentId, (err, msg) => {
+        if (err) {
+          setSaveStatus("Error!");
+          console.error(err);
+          // Optional: Show an alert or a more subtle error indicator
+        } else {
+          setSaveStatus("Saved");
+        }
+      });
     }, SAVE_INTERVAL_MS);
 
     return () => {
@@ -120,8 +142,34 @@ function Editor() {
     };
     socket.on("receive-changes", handler);
 
+    // --- NEW: Listen for title changes ---
+    const renameHandler = (newTitle) => {
+      setDocumentTitle(newTitle);
+    };
+    socket.on("document-renamed", renameHandler);
+
+    // --- NEW: Listen for document deletion ---
+    const deleteHandler = () => {
+      alert("This document has been deleted.");
+      navigate("/dashboard");
+    };
+    socket.on("document-deleted", deleteHandler);
+
+    // --- NEW: Listen for permission revocation ---
+    const permissionHandler = (revokedDocId) => {
+      // Check if the permission change affects the *current* document
+      if (revokedDocId === documentId) {
+        alert("Your permission to view this document has been revoked.");
+        navigate("/dashboard");
+      }
+    };
+    socket.on("permission-revoked", permissionHandler);
+
     return () => {
       socket.off("receive-changes", handler);
+      socket.off("document-renamed", renameHandler); // --- NEW ---
+      socket.off("document-deleted", deleteHandler); // --- NEW ---
+      socket.off("permission-revoked", permissionHandler); // --- NEW ---
     };
   }, [socket]);
 
@@ -145,7 +193,7 @@ function Editor() {
   return (
     <div className="App">
       <EditorNavbar
-        title={isLoaded ? "Document" : "Loading..."}
+        title={documentTitle}
         onBack={handleBack}
         onLogout={handleLogout}
       />
@@ -153,11 +201,13 @@ function Editor() {
       <div className="container editor-container">
         <div className="editor-top">
           <div className="editor-title">
-            {/* simple inline editable title (could be wired to document metadata later) */}
+            {/* --- MODIFIED: Use the state for the title --- */}
             <input
               placeholder="Document title"
               className="editor-title-input"
-              defaultValue=""
+              value={documentTitle}
+              // Add an onChange if you want to make it editable from here
+              readOnly // For now, it just reflects the state
               style={{
                 background: "transparent",
                 border: "none",
@@ -169,7 +219,9 @@ function Editor() {
             />
           </div>
 
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: 'center' }}>
+            {/* --- NEW: Show the save status --- */}
+            <div style={{ fontSize: 12, color: "#94a3b8" }}>{saveStatus}</div>
             <button className="button ghost" onClick={handleBack}>
               Back
             </button>
