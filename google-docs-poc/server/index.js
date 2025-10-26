@@ -147,7 +147,8 @@ app.post("/api/documents/:id/share", auth, async (req, res) => {
     }
 
     // 2. Check if the logged-in user is the owner (only owner can share)
-    if (document.owner.toString() !== loggedInUserId) {
+    // Corrected: Use .equals() for robust ObjectId comparison
+    if (!document.owner.equals(loggedInUserId)) {
       return res
         .status(403)
         .json({ message: "Only the document owner can share" });
@@ -158,26 +159,26 @@ app.post("/api/documents/:id/share", auth, async (req, res) => {
     if (!userToShareWith) {
       return res.status(404).json({ message: "User to share with not found" });
     }
-    const userToShareWithId = userToShareWith._id.toString();
+    const userToShareWithId = userToShareWith._id; // Corrected: Keep it as an ObjectId
 
     // 4. Check if they're sharing with themselves
-    if (userToShareWithId === loggedInUserId) {
+    // Corrected: Use .equals() for robust ObjectId comparison
+    if (userToShareWithId.equals(loggedInUserId)) {
       return res
         .status(400)
         .json({ message: "You cannot share a document with yourself" });
     }
 
     // 5. Check if document is already shared with this user
-    if (
-      document.collaborators.some((id) => id.toString() === userToShareWithId)
-    ) {
+    // Corrected: Use .equals() for robust ObjectId comparison
+    if (document.collaborators.some((id) => id.equals(userToShareWithId))) {
       return res
         .status(400)
         .json({ message: "Document already shared with this user" });
     }
 
     // 6. Add the user to the collaborators list and save
-    document.collaborators.push(userToShareWithId);
+    document.collaborators.push(userToShareWithId); // Corrected: Push the ObjectId
     await document.save();
 
     res.json({ message: "Document shared successfully" });
@@ -351,10 +352,10 @@ io.on("connection", (socket) => {
       }
 
       // Check if user has permission
-      const userId = socket.user.id;
-      const isOwner = document.owner.toString() === userId;
-      const isCollaborator = document.collaborators.some(
-        (collabId) => collabId.toString() === userId,
+      const userId = new mongoose.Types.ObjectId(socket.user.id); // Convert string ID to ObjectId
+      const isOwner = document.owner.equals(userId);
+      const isCollaborator = document.collaborators.some((collabId) =>
+        collabId.equals(userId),
       );
 
       if (!isOwner && !isCollaborator) {
